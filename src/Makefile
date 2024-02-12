@@ -4,7 +4,7 @@
 # See LICENSE.txt for license information
 #
 
-CUDA_HOME ?= /usr/local/cuda
+#CUDA_HOME ?= /usr/local/cuda
 PREFIX ?= /usr/local
 VERBOSE ?= 0
 DEBUG ?= 0
@@ -13,6 +13,10 @@ CUDA_LIB ?= $(CUDA_HOME)/lib64
 CUDA_INC ?= $(CUDA_HOME)/include
 NVCC ?= $(CUDA_HOME)/bin/nvcc
 CUDARTLIB ?= cudart
+
+
+NVML_LIB += $(CUDA_HOME)/lib/
+NVML_LIB_L := $(addprefix -L , $(NVML_LIB))
 
 CUDA_VERSION = $(strip $(shell which $(NVCC) >/dev/null && $(NVCC) --version | grep release | sed 's/.*release //' | sed 's/\,.*//'))
 CUDA_MAJOR = $(shell echo $(CUDA_VERSION) | cut -d "." -f 1)
@@ -38,7 +42,7 @@ NVCUFLAGS  := -ccbin $(CXX) $(NVCC_GENCODE) -std=c++11
 CXXFLAGS   := -std=c++11
 
 LDFLAGS    := -L${CUDA_LIB} -lcudart -lrt
-NVLDFLAGS  := -L${CUDA_LIB} -l${CUDARTLIB} -lrt
+NVLDFLAGS  := -L${CUDA_LIB} -l${CUDARTLIB} -lrt -lnvidia-ml $(NVML_LIB_L) -lm
 
 ifeq ($(DEBUG), 0)
 NVCUFLAGS += -O3 -g

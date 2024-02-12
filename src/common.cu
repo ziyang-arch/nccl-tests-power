@@ -12,6 +12,33 @@
 #include <libgen.h>
 #include "cuda.h"
 
+#include <sys/time.h> // For gettimeofday
+#include <unistd.h> // For sleep
+#include <nvml.h>   //nvml power measure
+
+
+#define POWERTEST
+#ifdef POWERTEST
+
+#define POWERLOG_FILENAME "power.log"
+#define BUFFER_SIZE_INCREMENT 1000 // Increment size when resizing buffer
+// Mutex for thread-safe file access
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Flag to signal the created thread to exit
+volatile int exit_flag = 0;
+
+// Buffer to store power usage data
+struct PowerData {
+    long timestamp_sec;
+    long timestamp_usec;
+    unsigned int power;
+} *power_buffer = NULL; // Initialize to NULL
+
+int buffer_index = 0;
+int buffer_size = 0;
+
+#endif
+
 #include "../verifiable/verifiable.h"
 
 int test_ncclVersion = 0; // init'd with ncclGetVersion()
@@ -402,6 +429,85 @@ testResult_t completeColl(struct threadArgs* args) {
   return testSuccess;
 }
 
+
+
+
+// Function to resize the buffer
+int resize_buffer() {
+    struct PowerData *new_buffer;
+    int old_buffer_size=buffer_size;
+    buffer_size += BUFFER_SIZE_INCREMENT;
+    new_buffer = (PowerData *)realloc(power_buffer, buffer_size * sizeof(struct PowerData));
+    if (new_buffer == NULL) {
+        fprintf(stderr, "Failed to resize buffer\n");
+        return 0;
+    }
+    memcpy((void*)new_buffer, (void*)power_buffer, old_buffer_size);
+    free(power_buffer);
+    power_buffer = new_buffer;
+    return 1;
+}
+
+
+// Function to read power usage and record time
+void *read_power(void *args) {
+    nvmlDevice_t device;
+    nvmlReturn_t result;
+    unsigned int power;
+    struct timeval current_time;
+
+    // Initialize NVML
+    result = nvmlInit_v2();
+    if (result != NVML_SUCCESS) {
+        fprintf(stderr, "Failed to initialize NVML: %s\n", nvmlErrorString(result));
+        return NULL;
+    }
+
+    // Get handle to the GPU device
+    result = nvmlDeviceGetHandleByIndex(0, &device);
+    if (result != NVML_SUCCESS) {
+        fprintf(stderr, "Failed to get handle to GPU device: %s\n", nvmlErrorString(result));
+        nvmlShutdown();
+        return NULL;
+    }
+
+    // Continuously read power usage and record time
+    while (1) {
+        // Get current time
+        gettimeofday(&current_time, NULL);
+
+        // Read power usage
+        result = nvmlDeviceGetPowerUsage(device, &power);
+        if (result == NVML_SUCCESS) {
+
+          // Check if buffer needs to be resized
+            if (buffer_index >= buffer_size) {
+                if (!resize_buffer()) {
+                    // Failed to resize buffer
+                    break;
+                }
+            }
+            // Store data in buffer
+            power_buffer[buffer_index].timestamp_sec = current_time.tv_sec;
+            power_buffer[buffer_index].timestamp_usec = current_time.tv_usec;
+            power_buffer[buffer_index].power = power;
+            buffer_index++; 
+        } else {
+            fprintf(stderr, "Failed to read power usage: %s\n", nvmlErrorString(result));
+        }
+
+        // Sleep for 1 second
+        sleep(1);
+    }
+
+    // Shutdown NVML
+    nvmlShutdown();
+
+    return NULL;
+}
+
+
+
 testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int in_place) {
   size_t count = args->nbytes / wordSize(type);
   if (datacheck) {
@@ -428,6 +534,19 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
       CUDACHECK(cudaStreamBeginCapture(args->streams[i], cudaStreamCaptureModeThreadLocal));
     }
   }
+#endif
+
+#ifdef POWERTEST
+  pthread_t thread_id;
+  int status;
+// Create a separate thread to read power usage
+    status = pthread_create(&thread_id, NULL, read_power, NULL);
+    if (status != 0) {
+        fprintf(stderr, "Failed to create thread: %d\n", status);
+        return testInternalError;
+    }
+
+
 #endif
 
   // Performance Benchmark
@@ -478,6 +597,9 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
     }
   }
 #endif
+
+
+
 
   double algBw, busBw;
   args->collTest->getBw(count, wordSize(type), deltaSec, &algBw, &busBw, args->nProcs*args->nThreads*args->nGpus);
@@ -541,6 +663,39 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
       wrongElts = wrongElts1;
       if (wrongElts) break;
   }
+
+#ifdef POWERTEST
+
+status = pthread_cancel(thread_id);
+    if (status != 0) {
+        fprintf(stderr, "Failed to cancel thread: %d\n", status);
+        return testInternalError;
+    }
+
+    // Write power usage data from buffer to file
+    FILE *fp = fopen(POWERLOG_FILENAME, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to open file %s\n", POWERLOG_FILENAME);
+        return testInternalError;
+    }
+
+    // Lock file access with mutex
+    pthread_mutex_lock(&file_mutex);
+
+    // Write data from buffer to file
+    for (int i = 0; i < buffer_index; ++i) {
+        fprintf(fp, "%ld.%06ld %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power);
+    }
+
+    // Unlock file access
+    pthread_mutex_unlock(&file_mutex);
+
+    // Close file
+    fclose(fp);
+
+
+#endif
+
 
   double timeUsec = (report_cputime ? cputimeSec : deltaSec)*1.0E6;
   char timeStr[100];
@@ -631,7 +786,7 @@ testResult_t threadInit(struct threadArgs* args) {
     NCCLCHECK(ncclCommInitRank(args->comms+i, nranks, args->ncclId, rank));
   }
   NCCLCHECK(ncclGroupEnd());
-
+  
   TESTCHECK(threadRunTests(args));
 
   for (int i=0; i<args->nGpus; i++) {
