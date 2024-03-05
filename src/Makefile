@@ -38,15 +38,25 @@ NVCC_GENCODE ?= -gencode=arch=compute_35,code=sm_35 \
                 -gencode=arch=compute_70,code=compute_70
 endif
 
+
+#NCCL_HOME :=/data3/zjia016/nccl/build
+KINETO_INC = /data3/zjia016/kineto/libkineto/include
+KINETO_LIB = /data3/zjia016/kineto/libkineto/build
+fmt_INC = /data3/zjia016/kineto/libkineto/third_party/fmt/include
+fmt_LIB = /data3/zjia016/kineto/libkineto/build/fmt
+
 NVCUFLAGS  := -ccbin $(CXX) $(NVCC_GENCODE) -std=c++11
-CXXFLAGS   := -std=c++11
+CXXFLAGS   := -std=c++11 -I${KINETO_INC} -I${fmt_INC}  -L${KINETO_LIB} -L${fmt_LIB} -D POWERTEST_ALL #for power set in common.cu
 
 LDFLAGS    := -L${CUDA_LIB} -lcudart -lrt
 NVLDFLAGS  := -L${CUDA_LIB} -l${CUDARTLIB} -lrt -lnvidia-ml $(NVML_LIB_L) -lm
 
+
+
+
 ifeq ($(DEBUG), 0)
 NVCUFLAGS += -O3 -g
-CXXFLAGS  += -O3 -g
+CXXFLAGS  += -O3 -g 
 else
 NVCUFLAGS += -O0 -G -g
 CXXFLAGS  += -O0 -g -ggdb3

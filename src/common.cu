@@ -16,11 +16,19 @@
 #include <unistd.h> // For sleep
 #include <nvml.h>   //nvml power measure
 
+//add this macro to makefile -D 
+#define POWERTEST_ALL
+//#define POWERTEST_BENCHTIME
 
-#define POWERTEST
-#ifdef POWERTEST
 
-#define POWERLOG_FILENAME "power.log"
+#ifdef POWERTEST_ALL
+#define POWERLOG_FILENAME "power_all.log"
+#endif
+#ifdef POWERTEST_BENCHTIME
+#define POWERLOG_FILENAME "power_benchtime.log"
+#endif
+
+#ifdef POWERTEST_ALL
 #define BUFFER_SIZE_INCREMENT 1000 // Increment size when resizing buffer
 // Mutex for thread-safe file access
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -32,12 +40,17 @@ struct PowerData {
     long timestamp_sec;
     long timestamp_usec;
     unsigned int power;
+    unsigned int clockFreq;
 } *power_buffer = NULL; // Initialize to NULL
 
 int buffer_index = 0;
 int buffer_size = 0;
 
+
+
 #endif
+
+
 
 #include "../verifiable/verifiable.h"
 
@@ -430,19 +443,19 @@ testResult_t completeColl(struct threadArgs* args) {
 }
 
 
-
+#ifdef POWERTEST_ALL
 
 // Function to resize the buffer
 int resize_buffer() {
     struct PowerData *new_buffer;
     int old_buffer_size=buffer_size;
     buffer_size += BUFFER_SIZE_INCREMENT;
-    new_buffer = (PowerData *)realloc(power_buffer, buffer_size * sizeof(struct PowerData));
+    new_buffer = (PowerData *)realloc(power_buffer, buffer_size * sizeof(PowerData));
     if (new_buffer == NULL) {
         fprintf(stderr, "Failed to resize buffer\n");
         return 0;
     }
-    memcpy((void*)new_buffer, (void*)power_buffer, old_buffer_size);
+    memcpy((void*)new_buffer, (void*)power_buffer, old_buffer_size* sizeof(PowerData));
     free(power_buffer);
     power_buffer = new_buffer;
     return 1;
@@ -452,8 +465,9 @@ int resize_buffer() {
 // Function to read power usage and record time
 void *read_power(void *args) {
     nvmlDevice_t device;
-    nvmlReturn_t result;
+    nvmlReturn_t result, result0, result1;
     unsigned int power;
+    unsigned int clockFreq;
     struct timeval current_time;
 
     // Initialize NVML
@@ -477,13 +491,15 @@ void *read_power(void *args) {
         gettimeofday(&current_time, NULL);
 
         // Read power usage
-        result = nvmlDeviceGetPowerUsage(device, &power);
-        if (result == NVML_SUCCESS) {
+        result0 = nvmlDeviceGetPowerUsage(device, &power);
+        result1 = nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &clockFreq);
+        if ( (result0 == NVML_SUCCESS) && (result1 == NVML_SUCCESS) ){
 
           // Check if buffer needs to be resized
             if (buffer_index >= buffer_size) {
                 if (!resize_buffer()) {
                     // Failed to resize buffer
+                    printf("failed to resize\n");
                     break;
                 }
             }
@@ -491,13 +507,14 @@ void *read_power(void *args) {
             power_buffer[buffer_index].timestamp_sec = current_time.tv_sec;
             power_buffer[buffer_index].timestamp_usec = current_time.tv_usec;
             power_buffer[buffer_index].power = power;
+            power_buffer[buffer_index].clockFreq = clockFreq;
             buffer_index++; 
         } else {
             fprintf(stderr, "Failed to read power usage: %s\n", nvmlErrorString(result));
         }
 
         // Sleep for 1 second
-        sleep(1);
+        //sleep(1);
     }
 
     // Shutdown NVML
@@ -506,6 +523,7 @@ void *read_power(void *args) {
     return NULL;
 }
 
+#endif
 
 
 testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int in_place) {
@@ -536,7 +554,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   }
 #endif
 
-#ifdef POWERTEST
+#ifdef POWERTEST_BENCHTIME
   pthread_t thread_id;
   int status;
 // Create a separate thread to read power usage
@@ -664,7 +682,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
       if (wrongElts) break;
   }
 
-#ifdef POWERTEST
+#ifdef POWERTEST_BENCHTIME
 
 status = pthread_cancel(thread_id);
     if (status != 0) {
@@ -673,7 +691,7 @@ status = pthread_cancel(thread_id);
     }
 
     // Write power usage data from buffer to file
-    FILE *fp = fopen(POWERLOG_FILENAME, "w");
+    FILE *fp = fopen(POWERLOG_FILENAME, "a"); //append to file
     if (fp == NULL) {
         fprintf(stderr, "Failed to open file %s\n", POWERLOG_FILENAME);
         return testInternalError;
@@ -684,7 +702,7 @@ status = pthread_cancel(thread_id);
 
     // Write data from buffer to file
     for (int i = 0; i < buffer_index; ++i) {
-        fprintf(fp, "%ld.%06ld %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power);
+        fprintf(fp, "%ld.%06ld %u %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power, power_buffer[i].clockFreq);
     }
 
     // Unlock file access
@@ -749,6 +767,28 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
   }
   TESTCHECK(completeColl(args));
 
+#ifdef POWERTEST_ALL
+
+  //clear file contents
+    FILE* file = fopen(POWERLOG_FILENAME, "w");
+    if (file == NULL) {
+        printf("Error opening file %s\n", POWERLOG_FILENAME);
+        return testInternalError;
+    }
+    fclose(file);
+
+  pthread_t thread_id;
+  int status;
+// Create a separate thread to read power usage
+    status = pthread_create(&thread_id, NULL, read_power, NULL);
+    if (status != 0) {
+        fprintf(stderr, "Failed to create thread: %d\n", status);
+        return testInternalError;
+    }
+
+
+#endif
+
   // Benchmark
   for (size_t size = args->minbytes; size<=args->maxbytes; size = ((args->stepfactor > 1) ? size*args->stepfactor : size+args->stepbytes)) {
       setupArgs(size, type, args);
@@ -759,6 +799,40 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       TESTCHECK(BenchTime(args, type, op, root, 1));
       PRINT("\n");
   }
+
+
+#ifdef POWERTEST_ALL
+
+status = pthread_cancel(thread_id);
+    if (status != 0) {
+        fprintf(stderr, "Failed to cancel thread: %d\n", status);
+        return testInternalError;
+    }
+
+    // Write power usage data from buffer to file
+    FILE *fp = fopen(POWERLOG_FILENAME, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to open file %s\n", POWERLOG_FILENAME);
+        return testInternalError;
+    }
+
+    // Lock file access with mutex
+    pthread_mutex_lock(&file_mutex);
+
+    // Write data from buffer to file
+    for (int i = 0; i < buffer_index; ++i) {
+        fprintf(fp, "%ld.%06ld %u %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power, power_buffer[i].clockFreq);
+    }
+
+    // Unlock file access
+    pthread_mutex_unlock(&file_mutex);
+
+    // Close file
+    fclose(fp);
+
+
+#endif
+
   return testSuccess;
 }
 
@@ -766,12 +840,44 @@ testResult_t threadRunTests(struct threadArgs* args) {
   // Set device to the first of our GPUs. If we don't do that, some operations
   // will be done on the current GPU (by default : 0) and if the GPUs are in
   // exclusive mode those operations will fail.
+
+
+  printf("enter threadRunTests\n");
+
+  //check frequency by nvml here
+  // Initialize NVML
+
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+
+  result = nvmlInit_v2();
+  if (result != NVML_SUCCESS) {
+      fprintf(stderr, "Failed to initialize NVML: %s\n", nvmlErrorString(result));
+  }
+
+  // Get handle to the GPU device
+  result = nvmlDeviceGetHandleByIndex(0, &device);
+  if (result != NVML_SUCCESS) {
+      fprintf(stderr, "Failed to get handle to GPU device: %s\n", nvmlErrorString(result));
+      nvmlShutdown();
+  }
+
+  unsigned int clockFreq;
+  result = nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &clockFreq);
+  if (NVML_SUCCESS != result) {
+      printf("Failed to query clock frequency for GPU %u: %s\n", 0, nvmlErrorString(result));
+      //goto Error;
+  }
+  printf("SM Frequency for GPU %u: %u MHz\n", 0, clockFreq);
+
+
   CUDACHECK(cudaSetDevice(args->gpus[0]));
   TESTCHECK(ncclTestEngine.runTest(args, ncclroot, (ncclDataType_t)nccltype, test_typenames[nccltype], (ncclRedOp_t)ncclop, test_opnames[ncclop]));
   return testSuccess;
 }
 
 testResult_t threadInit(struct threadArgs* args) {
+  
   char hostname[1024];
   getHostName(hostname, 1024);
   int nranks =  args->nProcs*args->nThreads*args->nGpus;
@@ -787,6 +893,7 @@ testResult_t threadInit(struct threadArgs* args) {
   }
   NCCLCHECK(ncclGroupEnd());
   
+
   TESTCHECK(threadRunTests(args));
 
   for (int i=0; i<args->nGpus; i++) {
