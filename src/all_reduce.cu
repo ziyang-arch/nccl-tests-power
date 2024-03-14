@@ -6,12 +6,6 @@
 
 #include "cuda_runtime.h"
 #include "common.h"
-#include <pthread.h>
-
-
-
-
-
 
 void AllReduceGetCollByteCount(size_t *sendcount, size_t *recvcount, size_t *paramcount, size_t *sendInplaceOffset, size_t *recvInplaceOffset, size_t count, int nranks) {
   *sendcount = count;

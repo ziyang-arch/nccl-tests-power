@@ -24,9 +24,7 @@
 #ifdef POWERTEST_ALL
 #define POWERLOG_FILENAME "power_all.log"
 #endif
-#ifdef POWERTEST_BENCHTIME
-#define POWERLOG_FILENAME "power_benchtime.log"
-#endif
+
 
 #ifdef POWERTEST_ALL
 #define BUFFER_SIZE_INCREMENT 1000 // Increment size when resizing buffer
@@ -36,15 +34,17 @@ pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 volatile int exit_flag = 0;
 
 // Buffer to store power usage data
-struct PowerData {
+typedef struct PowerData {
     long timestamp_sec;
     long timestamp_usec;
     unsigned int power;
     unsigned int clockFreq;
-} *power_buffer = NULL; // Initialize to NULL
+}  PowerData; // Initialize to NULL
 
 int buffer_index = 0;
-int buffer_size = 0;
+int buffer_size = 1000;
+
+PowerData * power_buffer=(PowerData *)malloc( 1000 * sizeof(PowerData));;
 
 
 
@@ -447,17 +447,12 @@ testResult_t completeColl(struct threadArgs* args) {
 
 // Function to resize the buffer
 int resize_buffer() {
-    struct PowerData *new_buffer;
-    int old_buffer_size=buffer_size;
     buffer_size += BUFFER_SIZE_INCREMENT;
-    new_buffer = (PowerData *)realloc(power_buffer, buffer_size * sizeof(PowerData));
-    if (new_buffer == NULL) {
+    power_buffer = (PowerData *)realloc(power_buffer, buffer_size * sizeof(PowerData));
+    if (power_buffer == NULL) {
         fprintf(stderr, "Failed to resize buffer\n");
         return 0;
     }
-    memcpy((void*)new_buffer, (void*)power_buffer, old_buffer_size* sizeof(PowerData));
-    free(power_buffer);
-    power_buffer = new_buffer;
     return 1;
 }
 
@@ -554,18 +549,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   }
 #endif
 
-#ifdef POWERTEST_BENCHTIME
-  pthread_t thread_id;
-  int status;
-// Create a separate thread to read power usage
-    status = pthread_create(&thread_id, NULL, read_power, NULL);
-    if (status != 0) {
-        fprintf(stderr, "Failed to create thread: %d\n", status);
-        return testInternalError;
-    }
 
-
-#endif
 
   // Performance Benchmark
   timer tim;
@@ -615,9 +599,6 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
     }
   }
 #endif
-
-
-
 
   double algBw, busBw;
   args->collTest->getBw(count, wordSize(type), deltaSec, &algBw, &busBw, args->nProcs*args->nThreads*args->nGpus);
@@ -681,38 +662,6 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
       wrongElts = wrongElts1;
       if (wrongElts) break;
   }
-
-#ifdef POWERTEST_BENCHTIME
-
-status = pthread_cancel(thread_id);
-    if (status != 0) {
-        fprintf(stderr, "Failed to cancel thread: %d\n", status);
-        return testInternalError;
-    }
-
-    // Write power usage data from buffer to file
-    FILE *fp = fopen(POWERLOG_FILENAME, "a"); //append to file
-    if (fp == NULL) {
-        fprintf(stderr, "Failed to open file %s\n", POWERLOG_FILENAME);
-        return testInternalError;
-    }
-
-    // Lock file access with mutex
-    pthread_mutex_lock(&file_mutex);
-
-    // Write data from buffer to file
-    for (int i = 0; i < buffer_index; ++i) {
-        fprintf(fp, "%ld.%06ld %u %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power, power_buffer[i].clockFreq);
-    }
-
-    // Unlock file access
-    pthread_mutex_unlock(&file_mutex);
-
-    // Close file
-    fclose(fp);
-
-
-#endif
 
 
   double timeUsec = (report_cputime ? cputimeSec : deltaSec)*1.0E6;
@@ -823,10 +772,11 @@ status = pthread_cancel(thread_id);
     for (int i = 0; i < buffer_index; ++i) {
         fprintf(fp, "%ld.%06ld %u %u\n", power_buffer[i].timestamp_sec, power_buffer[i].timestamp_usec, power_buffer[i].power, power_buffer[i].clockFreq);
     }
+    
 
     // Unlock file access
     pthread_mutex_unlock(&file_mutex);
-
+    free(power_buffer);
     // Close file
     fclose(fp);
 
